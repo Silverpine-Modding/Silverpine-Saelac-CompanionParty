@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Version>0.2.0</Version>
+    <Managed>../../Silverpine_Data/Managed</Managed>
+    <Plugins>../../BepInEx/plugins</Plugins>
+    <Core>../../BepInEx/core</Core>
+    <NuGetAudit>false</NuGetAudit>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="Tests/**/*.cs" />
+    <Reference Include="$(Core)/BepInEx.dll;$(Core)/0Harmony.dll;$(Plugins)/ModdingTools/ModdingTools.dll;$(Plugins)/ModdingTools/Newtonsoft.Json.dll;$(Managed)/Assembly-CSharp.dll;$(Managed)/UnityEngine*.dll;$(Managed)/Unity.TextMeshPro.dll" Private="false" />
+  </ItemGroup>
+</Project>

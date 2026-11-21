@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>netstandard2.1</TargetFramework><LangVersion>latest</LangVersion><AssemblyName>CompanionParty.Checks</AssemblyName><NuGetAudit>false</NuGetAudit></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../CompanionParty.csproj" />
+    <Reference Include="../../../BepInEx/core/BepInEx.dll;../../../BepInEx/core/0Harmony.dll;../../../Silverpine_Data/Managed/Assembly-CSharp.dll;../../../Silverpine_Data/Managed/UnityEngine*.dll;../../../Silverpine_Data/Managed/Unity.TextMeshPro.dll;../../../BepInEx/plugins/ModdingTools/ModdingTools.dll" Private="false"/>
+  </ItemGroup>
+</Project>
