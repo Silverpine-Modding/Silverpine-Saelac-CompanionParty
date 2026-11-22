@@ -14,8 +14,12 @@ public sealed class PackEntry
     public List<string> Components;
     public bool Loan;
     public int Slot;
+    // Retain the garment's last known coverage while its item or slot provider is absent.
+    [JsonProperty] internal BodyCoverage? SavedCoverage;
     [JsonIgnore] public Item Item;
     internal bool Visible => IsVisibleName(Item?.name ?? Name);
+    internal bool KnownPossession => Visible && (Slot == 0 ||
+        (Plugin.EquipmentInDialogue.Value && Item != null && Slot != (int)EquipmentSlotType.Fur));
     // The native InventoryUI uses this marker for implementation items such as racial fur.
     internal static bool IsVisibleName(string name) => name != null && !name.Contains("HIDDEN_");
 
@@ -49,9 +53,14 @@ public sealed class Companion
 {
     public string Name = "", Order = "Guard", Visit = "", WishFingerprint = "";
     public bool Recruited, Pinned, WishEligible;
+    [JsonProperty] internal bool ManagesOutfit;
+    [JsonProperty] internal bool ReceivedStartingEquipment;
+    [JsonIgnore] internal BodyCoverage Covered;
     public int Gold { get => Pack.gold; set => Pack.gold = value; }
     public int HP = 100, LastMaxHP = 100, Energy = 100, Sanity = 100, DownSince = -1, LastMeal = -2000, LastSnackTurn = -2000;
     public int VisitStart, LastShopTurn = -1000, LastWishDay = -1000, HealingTurns, HealRate;
+    public int LastRevivedTurn = -1;
+    public bool HelpedUpByPlayer;
     public bool VisitHandled, WishesFulfilled;
     public List<string> Wishes = new();
     public HashSet<string> ExpeditionReceipts = new(StringComparer.Ordinal);
@@ -61,16 +70,24 @@ public sealed class Companion
     [JsonIgnore] internal bool Rebind = true;
     [JsonIgnore] internal readonly HashSet<PackEntry> Failed = new();
     [JsonIgnore] internal int CombatTurn = -1, DidAttackTurn = -1;
-    [JsonIgnore] internal Enemy Attacker;
+    [JsonIgnore] internal Enemy Attacker, EngagedEnemy;
     [JsonIgnore] internal int AttackedTurn;
     [JsonIgnore] internal string RacialLight;
     [JsonIgnore] internal Stats CachedStats;
+    [JsonIgnore] internal PartySkillBonuses[] SkillBonuses = Array.Empty<PartySkillBonuses>();
     [JsonIgnore] internal int StatsTurn = -1;
+
+    internal void LeaveCombat()
+    {
+        Attacker = EngagedEnemy = null;
+    }
 
     internal void Bind(NeuralNPC npc)
     {
-        if (Actor != npc || Pack.owner != npc.gameObject)
+        bool newActor = Actor != npc || Pack.owner != npc.gameObject;
+        if (newActor)
         {
+            LeaveCombat();
             Actor = npc;
             Pack.owner = npc.gameObject;
             Name = npc.GetFinalName();
@@ -81,15 +98,24 @@ public sealed class Companion
         CachedStats = null;
         foreach (var entry in Items.Where(e => e.Item == null && !Failed.Contains(e)))
         {
-            try { entry.Restore(Pack); }
+            try
+            {
+                if (entry.Restore(Pack) && npc.npcName == NPCName.Aldric) StartingEquipment.RestoreAldricGarment(entry);
+            }
             catch (Exception ex) { Failed.Add(entry); Plugin.Log.LogWarning($"Retaining unavailable {entry.Name}: {ex.GetBaseException().Message}"); }
         }
+        if (newActor && Recruited) SkillBonuses = PartySkillApi.Resolve(npc);
         Clamp();
     }
 
     internal IEnumerable<PackEntry> Worn => Items.Where(e => e.Slot != 0 && e.Item != null);
     internal PackEntry Wears(EquipmentSlotType slot) => Worn.FirstOrDefault(e => e.Slot == (int)slot);
     internal bool Down => DownSince >= 0;
+    internal void RefreshSkills()
+    {
+        SkillBonuses = Recruited ? PartySkillApi.Resolve(Actor) : Array.Empty<PartySkillBonuses>();
+        Clamp();
+    }
     internal void Clamp()
     {
         CachedStats = null;
@@ -97,7 +123,12 @@ public sealed class Companion
         LastMaxHP = stats.MaxHP;
         HP = Mathf.Clamp(HP, Down ? 0 : 1, stats.MaxHP);
         Energy = Mathf.Clamp(Energy, 0, stats.MaxEnergy);
-        Pack.maxBulk = stats.Capacity;
+        if (Pack.maxBulk != stats.Capacity)
+        {
+            Pack.maxBulk = stats.Capacity;
+            Pack.UpdateEncumbered();
+        }
+        Outfit.Update(this);
     }
     internal void Remove(PackEntry entry)
     {
@@ -123,11 +154,12 @@ public sealed class Companion
         var slot = entry.Item.GetEquipmentSlotType();
         if (slot == EquipmentSlotType.NotEquipable || !GearMods.Available(entry.Sprite, (int)slot)) return false;
         var covers = entry.Item.GetItemComponent<ItemComponent_Accessory>()?.coveredSlots;
-        foreach (var other in Worn.ToArray())
+        foreach (var other in Items)
         {
+            if (other.Slot == 0) continue;
             var otherSlot = (EquipmentSlotType)other.Slot;
             if (otherSlot == slot || (covers?.Contains(otherSlot) ?? false) ||
-                (other.Item.GetItemComponent<ItemComponent_Accessory>()?.coveredSlots.Contains(slot) ?? false))
+                (other.Item?.GetItemComponent<ItemComponent_Accessory>()?.coveredSlots?.Contains(slot) ?? false))
                 other.Slot = 0;
         }
         entry.Slot = (int)slot;
@@ -159,13 +191,22 @@ internal static class State
         string key = Key(npc);
         if (!Save.People.TryGetValue(key, out var person)) Save.People.Add(key, person = new Companion());
         person.Bind(npc);
+        StartingEquipment.Ensure(person);
         return person;
     }
     internal static bool Find(NeuralNPC npc, out Companion person)
     {
         person = null;
-        if (npc == null || !Save.People.TryGetValue(Key(npc), out person)) return false;
+        if (npc == null) return false;
+        if (!Save.People.TryGetValue(Key(npc), out person))
+        {
+            if (!Plugin.Ready || !npc.isActiveAndEnabled || npc.npcName == NPCName.None ||
+                !NeuralNPC.neuralNPCs.TryGetValue(npc.npcName, out var resident) || resident != npc) return false;
+            person = Get(npc);
+            return true;
+        }
         person.Bind(npc);
+        StartingEquipment.Ensure(person);
         return true;
     }
     internal static string Capture()
@@ -174,12 +215,18 @@ internal static class State
             foreach (var entry in person.Items) entry.Capture();
         return JsonConvert.SerializeObject(Save);
     }
-    internal static void Reset() { Epoch++; Save = new Campaign(); PartyUI.Release(); Combat.Reset(); }
+    private static void ReleaseOutfits()
+    {
+        foreach (var person in Save.People.Values)
+            if (person.Actor) person.Actor.GetComponent<EquipmentKnowledge>()?.RestoreMapSprite();
+    }
+    internal static void Reset() { ReleaseOutfits(); Epoch++; Save = new Campaign(); PartyUI.Release(); Combat.Reset(); }
     internal static void Restore(string json)
     {
         var data = JsonConvert.DeserializeObject<Campaign>(json);
         if (data?.People == null || data.Attempts == null || data.People.Values.Any(p => p?.Items == null || p.Wishes == null || p.Gold < 0 ||
             p.Items.Any(e => e == null || string.IsNullOrEmpty(e.Data)))) throw new InvalidDataException("Invalid companion save.");
+        ReleaseOutfits();
         Save = data;
     }
     internal static bool Near(NeuralNPC npc, Transform target, float range)

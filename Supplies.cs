@@ -19,7 +19,8 @@ internal static class Supplies
         var entry = p.Items.FirstOrDefault(e => Healing(e.Item));
         if (entry == null) return false;
         var potion = entry.Item.GetItemComponent<ItemComponent_Potion>();
-        p.HealRate = Math.Max(1, Mathf.RoundToInt(4 * Fields.Read(potion, "potency", 1f) * stats.Potency));
+        float rate = 4 * Fields.Read(potion, "potency", 1f) * stats.Potency;
+        p.HealRate = rate >= int.MaxValue ? int.MaxValue : Math.Max(1, Mathf.RoundToInt(rate));
         p.HealingTurns = 10;
         p.Remove(entry);
         if (AnimationHelper.Instance) AnimationHelper.Instance.SpawnFloatingText("Healing", p.Actor.transform);
@@ -34,7 +35,7 @@ internal static class Supplies
         var edible = food.Item.GetItemComponent<ItemComponent_Edible>();
         p.LastMeal = Combat.Turn;
         p.Sanity = Mathf.Clamp(p.Sanity + Fields.Read<int>(edible, "sanityGain"), 0, 100);
-        p.Energy = Math.Min(Stats.Read(p).MaxEnergy, p.Energy + Math.Max(1, Fields.Read<int>(edible, "hungerLoss")));
+        p.Energy = (int)Math.Min(Stats.Read(p).MaxEnergy, (long)p.Energy + Math.Max(1, Fields.Read<int>(edible, "hungerLoss")));
         p.Remove(food);
         string action = $"{p.Name} eats {food.Name} from their own pack.";
         if (conversation) p.Actor.QuietlyAddSystemDialog(action);
@@ -59,11 +60,11 @@ internal static class Supplies
                 Revive(p);
             return;
         }
-        if (p.HealingTurns > 0) { p.HealingTurns--; p.HP = Math.Min(stats.MaxHP, p.HP + p.HealRate); }
-        int regen = Mathf.FloorToInt(stats.Regen);
-        if (UnityEngine.Random.value < stats.Regen - regen) regen++;
-        p.HP = Math.Min(stats.MaxHP, p.HP + regen);
-        p.Energy = Math.Min(stats.MaxEnergy, p.Energy + 1);
+        if (p.HealingTurns > 0) { p.HealingTurns--; p.HP = (int)Math.Min(stats.MaxHP, (long)p.HP + p.HealRate); }
+        int regen = stats.Regen >= int.MaxValue ? int.MaxValue : Mathf.FloorToInt(stats.Regen);
+        if (regen < int.MaxValue && UnityEngine.Random.value < stats.Regen - regen) regen++;
+        p.HP = (int)Math.Min(stats.MaxHP, (long)p.HP + regen);
+        p.Energy = (int)Math.Min(stats.MaxEnergy, (long)p.Energy + 1);
         if (stats.ColdSensitive && Combat.Turn % 60 == 0 && stats.Armor[(int)DamageType.Frost] < 2 &&
             p.Actor.GetPositionZoneNameAddOutside() == "Outside" && WorldInfoManager.Instance.GetSeasonFor(p.Actor.gameObject) == Season.Winter)
             p.Energy = Math.Max(0, p.Energy - 3);
@@ -110,10 +111,15 @@ internal static class Supplies
         LampLit.SetValue(lantern, needed);
         if (AudioPlayer.Instance) AudioPlayer.Instance.PlayAudioAtPosition(needed ? "sound_misc_light" : "sound_misc_extinguish", .8f, p.Actor.transform.GetVector2IntPosition());
     }
-    internal static void Revive(Companion p)
+    internal static void Revive(Companion p, bool helpedByPlayer = false)
     {
+        if (!p.Down) return;
         p.DownSince = -1;
+        p.LastRevivedTurn = Combat.Turn;
+        p.HelpedUpByPlayer = helpedByPlayer;
         p.HP = Math.Max(1, Stats.Read(p).MaxHP / 2);
+        if (helpedByPlayer && p.Recruited && PartySkillApi.ObservingActivity)
+            PartySkillApi.Completed(PartyActivity.HelpedUp, new List<NeuralNPC> { p.Actor });
         if (AnimationHelper.Instance) AnimationHelper.Instance.SpawnFloatingText("Back on my feet", p.Actor.transform);
     }
 }

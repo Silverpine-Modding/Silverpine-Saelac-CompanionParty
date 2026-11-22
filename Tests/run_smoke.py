@@ -50,9 +50,17 @@ def run():
         definitions.mkdir(parents=True)
         coat = {"id": "coat", "name": "Party Check Coat", "clone": "Leather Chest Armor",
                 "useCloneVisuals": True, "value": 15, "category": "Clothing",
+                "revealing": {"fullyCoversChest": False, "fullyCoversWaist": False,
+                              "description": "%NAME% has silver stitching on %HIS% shoulder"},
                 "attributeModifiers": {"maxHealth": 12, "fireArmor": 3, "speedBonus": 0.25}}
         cape = dict(coat, id="cape", name="Party Check Cape", equipmentSlot="silverpine.equipslots.back")
-        (definitions / "items.json").write_text(json.dumps({"packId": "party.test", "items": [coat, cape]}))
+        under = dict(coat, id="under", name="Party Check Underlayer", equipmentSlot="silverpine.equipslots.under-top",
+                     revealing=dict(coat["revealing"], description="A blue ribbon circles %HIS% sleeve."))
+        trousers = dict(coat, id="lining", name="Party Check Lining", equipmentSlot="silverpine.equipslots.under-waist")
+        del trousers["revealing"]
+        mantle = dict(coat, id="mantle", name="Party Check Mantle", equipmentSlot="silverpine.equipslots.back",
+                      revealing={"fullyCoversChest": True, "fullyCoversWaist": True})
+        (definitions / "items.json").write_text(json.dumps({"packId": "party.test", "items": [coat, cape, under, trousers, mantle]}))
         copy_tree(ROOT / "BepInEx/plugins/ModdingTools", plugins / "ModdingTools")
         shutil.copy2(PROJECT / "bin/Release/netstandard2.1/CompanionParty.dll", plugins)
         shutil.copy2(PROJECT / "Tests/bin/Release/netstandard2.1/CompanionParty.Checks.dll", plugins)
@@ -60,7 +68,9 @@ def run():
         for label, additions in (("native", ()), ("rendered-native", ()), ("loader", optional[:1]),
                                  ("loader-slots", optional[1:2]), ("all", optional[2:]),
                                  ("loader-expansion", ()), ("native-restore", ()), ("restored", ()),
-                                 ("dialogue-compatibility", ()), ("rendered-party", ())):
+                                 ("dialogue-compatibility", ()), ("rendered-party", ()), ("appearance", ("Revealing",))):
+            if label == "appearance" and not (ROOT / "BepInEx/plugins/Revealing/Revealing.dll").is_file():
+                continue
             if label == "dialogue-compatibility":
                 # Exercise the installed gold bridge and dialogue parser together
                 # with the same assembly preloaders used in the modded game.

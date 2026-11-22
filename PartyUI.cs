@@ -222,6 +222,10 @@ internal static class PartyUI
         var p = selected;
         return $"HP  {p.HP}/{p.LastMaxHP}     Gold  {p.Gold}     Bulk  {p.Pack.GetBulk():0.#}/{p.Pack.maxBulk:0.#}";
     }
+    internal static void RefreshSkillBenefits()
+    {
+        if (Opened && (page == Page.Roster || selected?.Recruited == true)) Rebuild();
+    }
     private static void Rebuild()
     {
         if (!overlay) return;
@@ -239,6 +243,15 @@ internal static class PartyUI
         var title = Line(heading, selected == null ? "Party controls" : selected.Name, 38); title.fontSize = 24;
         if (selected != null && !giftOnly) Button(heading, "Party", () => OpenRoster(), 76);
         Button(heading, "Close", Close, 78);
+        if (page == Page.Roster)
+        {
+            var setting = Plugin.EquipmentInDialogue;
+            Button(panel, "NPC equipment in dialogue (" + (setting.Value ? "on" : "off") + ")", () =>
+            {
+                setting.Value = !setting.Value;
+                Rebuild();
+            }, chosen: setting.Value);
+        }
         summary = null;
         nearLast = Near(); downLast = selected?.Down ?? false;
         if (selected != null)
@@ -292,7 +305,7 @@ internal static class PartyUI
         if (p.Down)
         {
             LocalButton(body, "Help up", () => {
-                Supplies.Revive(p); Close(); if (DialogBox.Instance.isOpen) DialogBox.Instance.EndDialog();
+                Supplies.Revive(p, helpedByPlayer: true); Close(); if (DialogBox.Instance.isOpen) DialogBox.Instance.EndDialog();
                 ActionQueue.Instance.RequestProcessTurn("Help companion up");
             });
             return;
@@ -382,10 +395,12 @@ internal static class PartyUI
         var p = selected;
         if (preview != null && p.Items.Contains(preview))
         {
-            var shadow = new Companion { Actor = p.Actor, Items = p.Items.Select(e => new PackEntry { Item = e.Item, Slot = e.Slot }).ToList() };
+            var shadow = new Companion { Actor = p.Actor, Recruited = p.Recruited, SkillBonuses = p.SkillBonuses,
+                Items = p.Items.Select(e => new PackEntry { Item = e.Item, Slot = e.Slot }).ToList() };
             if (shadow.Equip(shadow.Items[p.Items.IndexOf(preview)], false))
             {
                 Line(body, "With " + preview.Name);
+                ItemDescription(preview.Item);
                 foreach (var line in Stats.Describe(Stats.Read(shadow)).Split('\n')) Line(body, line);
                 LocalButton(body, "Equip " + preview.Name, () => { p.Equip(preview, true); preview = null; page = Page.Inventory; });
             }
@@ -395,16 +410,25 @@ internal static class PartyUI
         {
             var entry = p.Items.FirstOrDefault(e => e.Slot == slot.Key && e.Visible);
             if (slot.Key != (int)EquipmentSlotType.Fur || entry != null)
+            {
                 Line(body, slot.Value + "    " + (entry?.Name ?? "—"));
+                ItemDescription(entry?.Item);
+            }
         }
+    }
+    private static void ItemDescription(Item item)
+    {
+        if (string.IsNullOrWhiteSpace(item?.description)) return;
+        var label = Text(Rect("Item description", body), item.description);
+        label.enableWordWrapping = true;
+        label.overflowMode = TextOverflowModes.Overflow;
     }
     internal static string DescribePack(Companion p)
     {
-        var names = p.Items.Where(e => e.Item != null && e.Visible).GroupBy(e => e.Name).Select(g => g.Key + " x" + g.Count());
-        var lamp = p.Items.FirstOrDefault(e => Supplies.Has<ItemComponent_Lantern>(e.Item))?.Item;
+        var names = p.Items.Where(e => e.Slot == 0 && e.Item != null && e.Visible).GroupBy(e => e.Name).Select(g => g.Key + " x" + g.Count());
+        var lamp = p.Items.FirstOrDefault(e => e.KnownPossession && Supplies.Has<ItemComponent_Lantern>(e.Item))?.Item;
         var fuel = lamp?.GetItemComponent<ItemComponent_Durability>();
-        string report = $"{p.Name}'s personal belongings: {string.Join(", ", names.Take(50))}. Personal gold: {p.Gold}. " +
-            "Equipped: " + string.Join(", ", p.Worn.Where(e => e.Visible).Select(e => e.Name)) + ".";
+        string report = $"{p.Name}'s personal belongings: {string.Join(", ", names.Take(50))}. Personal gold: {p.Gold}.";
         if (fuel != null) report += $" Lantern fuel: {fuel.Durability:0}/{fuel.maxDurability:0}.";
         if (p.Wishes.Count > 0) report += " Private wishes: " + string.Join("; ", p.Wishes) + ".";
         return report;

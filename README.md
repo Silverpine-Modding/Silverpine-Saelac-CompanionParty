@@ -1,4 +1,4 @@
-# Companion Party 0.2.0
+# Companion Party 0.2.6
 
 A BepInEx 5 plugin for Silverpine 1.7.3. It uses Silverpine Modding Tools 1.13.0 or later for per-save storage, conversation actions, and prompt integration. Custom Item Loader, Additional Equipment Slots, and Attribute Expansion are optional.
 
@@ -6,7 +6,7 @@ Created by **Saelac and ChatGPT**. [Download the latest release](https://github.
 
 ## Installation
 
-Install BepInEx 5 and Silverpine Modding Tools 1.13.0 or later. With Silverpine closed, extract `CompanionParty-0.2.0.zip` into the game directory. For a manual installation, place `CompanionParty.dll` in `BepInEx/plugins/CompanionParty/`. [Silverpine Modding Tools releases](https://github.com/Silverpine-Modding/Silverpine-Saelac-Modding-Tools/releases/latest)
+Install BepInEx 5 and Silverpine Modding Tools 1.13.0 or later. With Silverpine closed, extract the Companion Party release ZIP into the game directory. For a manual installation, place `CompanionParty.dll` in `BepInEx/plugins/CompanionParty/`. [Silverpine Modding Tools releases](https://github.com/Silverpine-Modding/Silverpine-Saelac-Modding-Tools/releases/latest)
 
 ## Playing
 
@@ -23,6 +23,27 @@ When you cross into another overland world tile, awake, standing party members t
 **Give** transfers ownership. **Lend** lets you reclaim the exact item later. Use **Equip** in the pack to preview the change and confirm it on the equipment page. Choosing gear manually enables **Keep my equipment choices**. Clear that option in Orders to allow automatic upgrades again. **Gift gold** credits the recipient’s own purse, including before recruitment. Dialogue gifts use the same purse. A merchant uses their till for ordinary trade. The player can reclaim a loan from the pack, and a gift of coins or personal property can be returned through an agreed dialogue gift.
 
 An essential companion goes down at zero HP. Enemies drop them as a target. **Help up** costs a player turn. A downed character also recovers to half health after at least twelve world turns once nearby threats have cleared. Recruiting and combat use ordinary NPC objects and the game’s turn system. Followers use carried healing potions, snacks and fueled lanterns. At low fuel they consume a bottle of oil if they have one.
+
+Each dialogue prompt describes the speaker’s current wounds, incapacitation, or recent recovery. A companion can recognize who attacked them, whom they are fighting, and whether the player helped them up. Recovery and combat details expire as the scene changes. This uses the existing dialogue request.
+
+Open **Inventory → Mods → Party controls** to toggle **NPC equipment in dialogue**. It defaults to on. The speaker knows their own weapon and worn gear, and can see what nearby NPCs have equipped. Each description names the wearer and uses their pronouns. Native clothing details, registered custom slots, and visible clothing details from the optional Revealing mod are supported. Carried items and gold belong to the speaker’s private pack. The toggle applies to the next prompt and is saved as `[Dialogue] IncludeNpcEquipment` in `BepInEx/config/silverpine.companionparty.cfg`.
+
+The ten base-game residents start with personal outfits based on their portraits. Custom NPCs start in Silverpine’s **Linen Shirt** and **Linen Pants**. Starting equipment belongs to the NPC and is granted once per save. When upgrading a save, a resident who already has a managed outfit keeps wearing it and receives the starting clothes in their pack.
+
+| Resident | Starting equipment |
+| --- | --- |
+| Acacia | Patterned Woven Top, Fringed Hide Wrap |
+| Aldric | Merchant's Green Vest, Merchant's Breeches |
+| Celandine | Corded Ivory Dress |
+| Darian | Belted Trail Tunic, Trail Trousers and Gaiters, Belt Sword |
+| Gareth | Tavern Keeper's Apron, Tavern Keeper's Breeches |
+| Hayden | Baker's Apron and Shirt, Baker's Cuffed Trousers |
+| Mirel | Blue-Embroidered Blouse, Tied Hip Wrap |
+| Oriana | Laced Cream Gown |
+| Orson | Archer's Blue Tunic, Archer's Field Trousers, Bow, Quiver |
+| Rosalyn | Apothecary's Sashed Dress |
+
+Chest and waist coverage follow the player’s equipment rules. A robe can cover both areas, underlayers count when Additional Equipment Slots is installed, and Revealing’s item settings take precedence for that garment. Removing the last covering layer selects the NPC’s alternate dialogue portrait when available. Linked playerSILC characters can also use their own alternate map sprite. The dialogue toggle controls whether speakers describe coverage and visible clothing. Changing equipment and artwork uses no model calls.
 
 ## Shopping and wishes
 
@@ -43,6 +64,47 @@ Other expedition integrations can call `ExpeditionApi.Register` with assignment 
 Armor uses damage type and quality. The equipment page displays the wearer’s stats. Supported playerSILC traits include Hollow Bones, Thick Skin, Fur, Large Claws, Night Vision, Bioluminescence, Slow and Cold Weakness. Custom Item Loader gear uses its registered slot and basic modifiers. Additional Equipment Slots supplies its live slot IDs. Attribute Expansion adds critical chance, parry, reflection, potion potency, sale and relationship bonuses, durability preservation, regeneration and movement bonuses.
 
 Personal packs use the Modding Tools companion file alongside the ordinary game save. Keep the pair together when moving a save. Missing content retains its serialized item and assignment. Restoring the provider permits the item to load again with its saved durability. A vendor’s daily restock operates on their shop inventory.
+
+## Skill API
+
+Version 0.2.6 adds `PartySkillApi.PlayerActivity`. Subscribe an `Action<Player, PartyActivity, IReadOnlyList<NeuralNPC>>` to observe a completed overworld crossing with at least one arriving recruit (`TravelledTogether`) or a recruited companion the player helped up (`HelpedUp`). A crossing emits a single event for the whole travelling group. Each event supplies a read-only snapshot of the participating NPCs.
+
+A skills mod can register a callback with `CompanionParty.PartySkillApi` to grant benefits to recruited NPCs. The callback receives the current `Player` and the individual `NeuralNPC`, including custom NPCs. Return `default` for a follower who does not qualify. Each provider's values add to gear, racial traits, and other providers. Guild assignments qualify only while the NPC is also recruited.
+
+Reference `CompanionParty.dll` (0.2.5 or later) and the game's `Assembly-CSharp.dll` in the integration. The Companion Party BepInEx ID is `silverpine.companionparty`. The example takes the skill mod's own rank lookup and returns a registration to keep until unload.
+
+```csharp
+using System;
+using CompanionParty;
+
+public static class LeadershipIntegration
+{
+    public static IDisposable Connect(Func<Player, int> leadershipRank)
+    {
+        return PartySkillApi.Register("example.skills.leadership", (player, follower) =>
+        {
+            int rank = leadershipRank(player);
+            return new PartySkillBonuses
+            {
+                MaxHealth = 5 * rank,
+                CarryCapacity = 2 * rank,
+                MeleeParryChance = 0.01f * rank
+            };
+        });
+    }
+}
+```
+
+| Bonus fields | Units and effect |
+| --- | --- |
+| `MaxHealth`, `MaxEnergy`, `CarryCapacity` | Extra points. Raising a maximum preserves current HP or energy. Lowering it clamps the current value. |
+| `AttackDamage` | Flat damage per melee, unarmed, or ranged hit, before fatigue, melee criticals, and the target's armor. |
+| `NormalArmor`, `FireArmor`, `FrostArmor` | Armor points against the matching damage type. |
+| `HealthRegenerationPerTurn` | Additional HP per world turn for standing companions. Fractions give a chance to recover one extra HP. |
+| `PotionPotencyBonus` | Added to the healing potion multiplier. A value of 0.25 adds 25 percentage points. |
+| `MeleeCriticalChance`, `MeleeParryChance`, `DurabilityPreservationChance`, `ExtraStepChance` | Additional chance as a fraction. A value of 0.05 adds five percentage points. |
+
+Use a unique provider ID and register once when your skill data is ready. Call `PartySkillApi.Refresh()` after a rank change, respec, or skill-save load. Recruitment, companion save loading, registration, and disposal also update the benefits. Combat, HUD updates, and gear previews reuse the calculated values. Dispose the handle on unload. Make these calls on Unity's main thread and keep the callback read-only. Negative and non-finite bonus inputs contribute zero. A throwing callback contributes zero for that NPC, logs its first failure, and can recover on the next refresh.
 
 ## Build and verification
 

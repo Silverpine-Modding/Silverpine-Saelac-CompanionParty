@@ -26,18 +26,32 @@ internal static class GearMods
 {
     internal const string Loader = "renegadex.silverpine.customitemloader";
     internal const string Expansion = "renegadex.silverpine.attributeexpansion";
+    internal const string Revealing = "renegadex.silverpine.revealing";
     private static MethodInfo findItem, findSlot, allSlots, getModifier;
+    private static MethodInfo findAppearance, isUnderTop, isUnderWaist;
+    private static PropertyInfo slotId;
     private static IDictionary basics;
     internal static bool Expanded;
     internal static void Init()
     {
         Expanded = Chainloader.PluginInfos.ContainsKey(Expansion);
+        if (Chainloader.PluginInfos.TryGetValue(Revealing, out var appearance))
+        {
+            var type = appearance.Instance.GetType().Assembly.GetType("SilverpineMods.Revealing.RevealingRuntime");
+            if (type != null)
+            {
+                findAppearance = AccessTools.Method(type, "TryGet");
+                isUnderTop = AccessTools.Method(type, "IsUnderTop");
+                isUnderWaist = AccessTools.Method(type, "IsUnderWaist");
+            }
+        }
         if (!Chainloader.PluginInfos.TryGetValue(Loader, out var info)) return;
         var dll = info.Instance.GetType().Assembly;
         Type LoaderType(string name) => dll.GetType("SilverpineMods.CustomItemLoader." + name);
         var registry = LoaderType("CustomEquipmentSlotRegistry");
         findItem = LoaderType("CustomItemApi")?.GetMethod("TryGetItem");
         findSlot = registry?.GetMethods().FirstOrDefault(m => m.Name == "TryGetSlot" && m.GetParameters()[0].ParameterType == typeof(int));
+        slotId = LoaderType("CustomEquipmentSlotInfo")?.GetProperty("Id");
         allSlots = registry?.GetMethod("GetSlots");
         getModifier = LoaderType("CustomAttributeModifierApi")?.GetMethod("GetModifier");
         basics = AccessTools.Field(info.Instance.GetType(), "AttributeModifiers")?.GetValue(null) as IDictionary;
@@ -59,6 +73,57 @@ internal static class GearMods
         return slots;
     }
     internal static object Basic(Item i) => i.spriteName == null ? null : basics?[i.spriteName];
+    private static object Appearance(Item item)
+    {
+        if (findAppearance == null || item == null) return null;
+        object[] args = { item, null };
+        return findAppearance.Invoke(null, args) is true ? args[1] : null;
+    }
+
+    internal static BodyCoverage NativeCoverage(PackEntry entry)
+    {
+        var slot = (EquipmentSlotType)entry.Slot;
+        var covered = entry.Item?.GetItemComponent<ItemComponent_Accessory>()?.coveredSlots;
+        BodyCoverage result = BodyCoverage.None;
+        if (slot == EquipmentSlotType.Chest || covered?.Contains(EquipmentSlotType.Chest) == true) result |= BodyCoverage.Chest;
+        if (slot == EquipmentSlotType.Legs || covered?.Contains(EquipmentSlotType.Legs) == true) result |= BodyCoverage.Waist;
+        if (entry.Slot > (int)EquipmentSlotType.Neck && findSlot != null)
+        {
+            object[] args = { entry.Slot, null };
+            if (findSlot.Invoke(null, args) is true)
+                switch (slotId?.GetValue(args[1]) as string)
+                {
+                    case "silverpine.equipslots.under-top": result |= BodyCoverage.Chest; break;
+                    case "silverpine.equipslots.under-waist": result |= BodyCoverage.Waist; break;
+                }
+        }
+        return result;
+    }
+
+    internal static BodyCoverage Coverage(Item item, BodyCoverage native)
+    {
+        object settings = Appearance(item);
+        if (settings == null) return native;
+        return (Fields.Read<bool>(settings, "FullyCoversChest") ? BodyCoverage.Chest : BodyCoverage.None) |
+            (Fields.Read<bool>(settings, "FullyCoversWaist") ? BodyCoverage.Waist : BodyCoverage.None);
+    }
+
+    internal static string VisibleDetail(Companion wearer, PackEntry entry)
+    {
+        object own = Appearance(entry.Item);
+        if (own == null || Fields.Read<bool>(own, "FullyCoversChest") || Fields.Read<bool>(own, "FullyCoversWaist")) return null;
+        // Revealing shows an under-layer's authored detail only through a configured outer garment.
+        object[] slot = { (EquipmentSlotType)entry.Slot };
+        if (isUnderTop?.Invoke(null, slot) is true && !OuterShows(EquipmentSlotType.Chest, "FullyCoversChest")) return null;
+        if (isUnderWaist?.Invoke(null, slot) is true && !OuterShows(EquipmentSlotType.Legs, "FullyCoversWaist")) return null;
+        return Fields.Read<string>(own, "Description");
+
+        bool OuterShows(EquipmentSlotType outerSlot, string covers)
+        {
+            var outer = Appearance(wearer.Wears(outerSlot)?.Item);
+            return outer != null && !Fields.Read<bool>(outer, covers, true);
+        }
+    }
     internal static float Extra(Item item, string field) =>
         Expanded && getModifier != null && item.spriteName.StartsWith("custom:", StringComparison.OrdinalIgnoreCase)
             ? (float)getModifier.Invoke(null, new object[] { item, field }) : 0;
@@ -66,7 +131,7 @@ internal static class GearMods
 
 internal sealed class Stats
 {
-    internal int MaxHP = 100, MaxEnergy = 100, Capacity = 40;
+    internal int MaxHP = 100, MaxEnergy = 100, Capacity = 40, AttackDamage;
     internal readonly int[] Armor = new int[4];
     internal float Crit, Parry, Reflect, Potency = 1, Sell, Social, Preserve, Regen, Speed;
     internal bool Claws, NightSight, Glow, Slow, ColdSensitive;
@@ -100,6 +165,8 @@ internal sealed class Stats
                 }
         }
         foreach (var entry in person.Worn) result.Add(entry.Item);
+        if (person.Recruited)
+            foreach (var benefit in person.SkillBonuses) result.Add(benefit);
         result.MaxHP = Math.Max(1, result.MaxHP);
         result.MaxEnergy = Math.Max(1, result.MaxEnergy);
         result.Capacity = Math.Max(1, result.Capacity);
@@ -109,6 +176,24 @@ internal sealed class Stats
         person.CachedStats = result;
         return result;
     }
+    private void Add(PartySkillBonuses benefit)
+    {
+        MaxHP = Points(MaxHP, benefit.MaxHealth);
+        MaxEnergy = Points(MaxEnergy, benefit.MaxEnergy);
+        Capacity = Points(Capacity, benefit.CarryCapacity);
+        AttackDamage = Points(AttackDamage, benefit.AttackDamage);
+        Armor[(int)DamageType.Normal] = Points(Armor[(int)DamageType.Normal], benefit.NormalArmor);
+        Armor[(int)DamageType.Fire] = Points(Armor[(int)DamageType.Fire], benefit.FireArmor);
+        Armor[(int)DamageType.Frost] = Points(Armor[(int)DamageType.Frost], benefit.FrostArmor);
+        Crit += Mathf.Clamp01(Positive(benefit.MeleeCriticalChance));
+        Parry += Mathf.Clamp01(Positive(benefit.MeleeParryChance));
+        Speed += Mathf.Clamp01(Positive(benefit.ExtraStepChance));
+        Preserve += Mathf.Clamp01(Positive(benefit.DurabilityPreservationChance));
+        Regen += Positive(benefit.HealthRegenerationPerTurn);
+        Potency += Positive(benefit.PotionPotencyBonus);
+    }
+    private static int Points(int current, int bonus) => (int)Math.Min(int.MaxValue, (long)current + Math.Max(0, bonus));
+    private static float Positive(float bonus) => float.IsNaN(bonus) || float.IsInfinity(bonus) ? 0 : Math.Max(0, bonus);
     internal void Add(Item item)
     {
         foreach (var clothing in item.GetItemComponents<ItemComponent_Clothing>())
@@ -153,6 +238,7 @@ internal sealed class Stats
     }
     internal static string Describe(Stats s) =>
         $"Max HP {s.MaxHP}   Energy {s.MaxEnergy}   Carry {s.Capacity}\nArmor   Normal {s.Armor[0]}   Fire {s.Armor[2]}   Frost {s.Armor[3]}\n" +
+        (s.AttackDamage > 0 ? $"Attack damage +{s.AttackDamage}\n" : "") +
         $"Crit bonus {s.Crit:P0}   Parry {s.Parry:P0}   Reflect {s.Reflect:P0}   Potion potency {s.Potency:P0}\n" +
         $"Regen {s.Regen:0.##}/turn   Extra step {s.Speed:P0}   Preserve gear {s.Preserve:P0}   Sales {s.Sell:+0%;-0%;0%}   Rapport {s.Social:P0}";
 }

@@ -15,12 +15,14 @@ namespace CompanionParty;
 [BepInDependency(GearMods.Loader, BepInDependency.DependencyFlags.SoftDependency)]
 [BepInDependency(GearMods.Expansion, BepInDependency.DependencyFlags.SoftDependency)]
 [BepInDependency("renegadex.silverpine.additionalequipmentslots", BepInDependency.DependencyFlags.SoftDependency)]
+[BepInDependency(GearMods.Revealing, BepInDependency.DependencyFlags.SoftDependency)]
 public sealed class Plugin : BaseUnityPlugin
 {
     internal const string Id = "silverpine.companionparty";
-    internal const string Version = "0.2.0";
+    internal const string Version = "0.2.6";
     internal static ManualLogSource Log;
     internal static ConfigEntry<int> Budget, RefreshDays;
+    internal static ConfigEntry<bool> EquipmentInDialogue;
     internal static bool Ready => !SerializationManager.loadingSave && Player.Instance && WorldInfoManager.Instance && ActionQueue.Instance &&
         DialogBox.Instance && PauseMenuManager.Instance && Player.Instance.worldInventory != null &&
         NeuralNPC.neuralNPCs != null && !MainMenuUIActive();
@@ -28,6 +30,8 @@ public sealed class Plugin : BaseUnityPlugin
     private void Awake()
     {
         Log = Logger;
+        EquipmentInDialogue = Config.Bind("Dialogue", "IncludeNpcEquipment", true,
+            "Include worn equipment and clothing coverage for the speaker and NPCs they can see in dialogue prompts.");
         Budget = Config.Bind("Wishes", "AttemptsPerHalfHour", 2, new ConfigDescription("Shared attempts per 30 minutes of play. Zero disables wish generation.", new AcceptableValueRange<int>(0, 12)));
         RefreshDays = Config.Bind("Wishes", "MinimumDays", 3, new ConfigDescription("Minimum days between attempts for a character.", new AcceptableValueRange<int>(1, 90)));
         GearMods.Init();
@@ -45,8 +49,8 @@ public sealed class Plugin : BaseUnityPlugin
         DialoguePromptTransforms.Register(Id, new DialoguePromptTransformDefinition
         {
             Id = Id + ".pack-context",
-            TransformText = (context, section, text) => section == DialoguePromptTextSection.Environment && State.Find(context.Npc, out var p)
-                ? text + "\n" + PartyUI.DescribePack(p) : text
+            TransformText = (context, section, text) => section == DialoguePromptTextSection.Environment
+                ? DialogueScene.Append(context.Npc, text) : text
         });
         InventoryModTools.RegisterSession(Id + ".controls", "Party controls",
             (_, session) => PartyUI.OpenRoster(session), order: 150);

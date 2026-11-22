@@ -84,7 +84,7 @@ internal static class Wishes
             string prompt = "Choose zero to three possessions this person would privately like, grounded in their character knowledge. " +
                 "Return a JSON array only. Each element has an item (a short item name or category such as book, food, lantern, oil, healing potion, armor, weapon) " +
                 "and a brief reason. An empty array is valid. Prefer something they do not already own.\nCharacter: " + context +
-                "\nOwned: " + string.Join(", ", p.Items.Where(e => e.Visible).Take(25).Select(e => e.Name));
+                "\nOwned: " + string.Join(", ", p.Items.Where(e => e.KnownPossession).Take(25).Select(e => e.Name));
             string reply = await InferenceServerSetupHandler.Instance.GenerateSimpleLowTemp("", new List<string> { prompt }, true, maxLength: 150);
             if (epoch != State.Epoch) return;
             int start = reply.IndexOf('['), end = reply.LastIndexOf(']');

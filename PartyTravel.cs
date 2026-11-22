@@ -44,12 +44,17 @@ internal static class PartyTravel
         var destination = __instance.GetCurrentPlayerWorldTile();
         if (__instance.GetPositionWorldTile(spawn) != destination) return;
         using var places = ArrivalPlaces(__instance, destination, spawn).GetEnumerator();
+        var arrived = PartySkillApi.ObservingActivity ? new List<NeuralNPC>() : null;
         foreach (var npc in NeuralNPC.neuralNPCs.Values.ToArray())
         {
             if (!npc || !npc.isActiveAndEnabled || !State.Find(npc, out var p) || !__state.Members.Remove(p) || !p.Recruited || p.Down) continue;
-            p.Attacker = null;
+            p.LeaveCombat();
             var pos = npc.transform.GetVector2IntPosition();
-            if ((pos - spawn).sqrMagnitude <= 2 && pos != spawn && __instance.GetPositionWorldTile(pos) == destination) continue;
+            if ((pos - spawn).sqrMagnitude <= 2 && pos != spawn && __instance.GetPositionWorldTile(pos) == destination)
+            {
+                arrived?.Add(npc);
+                continue;
+            }
             if (!npc.TryGetComponent<EntityMover>(out var mover) || !places.MoveNext()) continue;
             var path = npc.GetComponent<PathfindingEntity>();
             var exec = npc.GetComponent<NPCRoutineExecutor>();
@@ -57,7 +62,10 @@ internal static class PartyTravel
             if (path && !path.HasReachedTargetPosition) path.ClearPathAndDeclareSuccess();
             mover.Teleport(places.Current);
             mover.TurnTowards(spawn);
+            if (arrived != null && __instance.GetPositionWorldTile(npc.transform.GetVector2IntPosition()) == destination)
+                arrived.Add(npc);
         }
+        if (arrived != null) PartySkillApi.Completed(PartyActivity.TravelledTogether, arrived);
     }
 
     private static IEnumerable<Vector2Int> ArrivalPlaces(DungeonGenerationManager map, WorldTile tile, Vector2Int spawn)

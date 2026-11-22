@@ -20,7 +20,7 @@ public static class PartyApi
         EnsureRoutine(person);
         if (!exec.GetCurrentAndPreOverrideRoutines().Any(r => r?.id == FollowId)) return false;
         person.Recruited = person.WishEligible = true;
-        person.Clamp();
+        person.RefreshSkills();
         return true;
     }
     internal static void EnsureRoutine(Companion person)
@@ -36,7 +36,8 @@ public static class PartyApi
     {
         if (!State.Find(npc, out var p)) return;
         p.Recruited = false;
-        p.Attacker = null;
+        p.RefreshSkills();
+        p.LeaveCombat();
         var exec = npc.GetComponent<NPCRoutineExecutor>();
         foreach (var routine in exec.GetCurrentAndPreOverrideRoutines().Where(r => r?.id == FollowId).ToArray())
         {
@@ -76,19 +77,28 @@ internal static class Combat
     private static bool CanRetaliate(Companion p)
     {
         if (!p.Attacker) return false;
-        if (!Hostile(p.Attacker) || Turn - p.AttackedTurn > 6)
+        if (!Hostile(p.Attacker) || !Recent(p.AttackedTurn))
         { p.Attacker = null; return false; }
+        return InSight(p, p.Attacker);
+    }
+    internal static bool Recent(int when, int turns = 6) =>
+        WorldInfoManager.Instance && when >= 0 && when <= Turn && Turn - when <= turns;
+    internal static bool InSight(Companion p, Enemy enemy)
+    {
         var from = p.Actor.transform.GetVector2IntPosition();
-        var to = p.Attacker.transform.GetVector2IntPosition();
+        var to = enemy.transform.GetVector2IntPosition();
         // An attack through an open doorway can originate across a named zone boundary.
         return (from - to).sqrMagnitude <= 36 &&
             (from.IsAdjacent(to) || TurfCollider.CanPositionsSeeEachOtherAdvanced(from, to));
     }
     internal static bool Act(Companion p, Stats stats)
     {
-        if (p.Down || (p.Actor.sleeping && !(p.Order == "Guard" && CanRetaliate(p)))) return true;
+        if (p.Down || (p.Actor.sleeping && !(p.Order == "Guard" && CanRetaliate(p))))
+        { p.EngagedEnemy = null; return true; }
         var enemy = Target(p);
+        p.EngagedEnemy = enemy;
         if (!enemy) return false;
+        p.CombatTurn = Turn;
         if (p.HP <= stats.MaxHP * .45f && Supplies.Heal(p, stats)) return true;
         var target = enemy.GetComponent<Damagable>();
         var weapon = p.Wears(EquipmentSlotType.Weapon)?.Item;
@@ -116,13 +126,14 @@ internal static class Combat
         float scale = tool is IQualityItemComponent q ? 1 + (int)q.Quality * .5f : 1;
         int lo = Mathf.RoundToInt(Fields.Read(tool, "minDamage", claws ? 10 : 0) * scale);
         int hi = Mathf.RoundToInt(Fields.Read(tool, "maxDamage", claws ? 19 : 5) * scale);
-        int damage = Random.Range(lo, Math.Max(lo, hi) + 1);
+        long damage = (long)Random.Range(lo, Math.Max(lo, hi) + 1) + stats.AttackDamage;
         if (p.Energy < cost) damage /= 2;
         bool critical = !shoot && Random.value < stats.Crit + Fields.Read<float>(tool, "critChance");
         if (shoot) ammo.Item.GetItemComponent<ItemComponent_Charges>().TakeCharge();
         p.Energy = Math.Max(0, p.Energy - cost);
         p.Actor.GetComponent<EntityMover>().TurnTowards(to);
-        target.TakeDamage(p.Actor.gameObject, new Damage(critical ? damage * 2 : damage, DamageType.Normal), critical);
+        int amount = (int)Math.Min(int.MaxValue, critical ? damage * 2 : damage);
+        target.TakeDamage(p.Actor.gameObject, new Damage(amount, DamageType.Normal), critical);
         if (tool != null) Wear(p, shoot ? bow : weapon, stats);
         return true;
     }
@@ -179,7 +190,7 @@ internal static class Combat
         int hit = Mathf.CeilToInt(raw * Mathf.Pow(.5f, stats.Armor[(int)type] / 10f));
         p.HP = Mathf.Clamp(p.HP - hit, 0, stats.MaxHP);
         bool knockedDown = p.HP == 0;
-        if (knockedDown) { p.DownSince = Turn; p.HealingTurns = 0; p.Attacker = null; }
+        if (knockedDown) { p.DownSince = Turn; p.HealingTurns = 0; p.LeaveCombat(); }
         if (AnimationHelper.Instance) AnimationHelper.Instance.SpawnFloatingText(hit.ToString(), p.Actor.transform);
         if (hit > 0)
             foreach (var armor in p.Worn.Where(e => e.Item.GetItemComponent<ItemComponent_Clothing>() != null).ToArray()) Wear(p, armor.Item, stats, hit);
@@ -250,6 +261,7 @@ internal static class EssentialDeath
         p.HP = 0;
         p.DownSince = Combat.Turn;
         p.HealingTurns = 0;
+        p.LeaveCombat();
         __result = Array.Empty<object>().GetEnumerator();
         return false;
     }
