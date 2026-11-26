@@ -19,7 +19,7 @@ namespace CompanionParty;
 public sealed class Plugin : BaseUnityPlugin
 {
     internal const string Id = "silverpine.companionparty";
-    internal const string Version = "0.2.6";
+    internal const string Version = "0.2.10";
     internal static ManualLogSource Log;
     internal static ConfigEntry<int> Budget, RefreshDays;
     internal static ConfigEntry<bool> EquipmentInDialogue;
@@ -127,6 +127,7 @@ internal sealed class PartyRuntime : MonoBehaviour
         if (Time.unscaledTime >= nextRestore)
         {
             nextRestore = Time.unscaledTime + 2;
+            State.EnsureCustomResidents();
             foreach (var p in State.Save.People.Values)
                 if (p.Items.Any(e => e.Item == null && !p.Failed.Contains(e))) p.Rebind = true;
             foreach (var npc in NeuralNPC.neuralNPCs.Values.ToArray())

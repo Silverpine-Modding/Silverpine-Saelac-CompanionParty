@@ -104,7 +104,7 @@ internal sealed class EquipmentKnowledge : MonoBehaviour, INPCVisibleObjectAddit
             // Revealing uses the authored text in place of a generic line for that body area.
             switch (wearer.Covered | described)
             {
-                case BodyCoverage.None: lines.Add($"{name} is nude."); break;
+                case BodyCoverage.None when wearer.Recruited || wearer.Actor.isNude: lines.Add($"{name} is nude."); break;
                 case BodyCoverage.Waist: lines.Add($"{name}'s chest is uncovered."); break;
                 case BodyCoverage.Chest: lines.Add($"{name} is uncovered below the waist."); break;
             }

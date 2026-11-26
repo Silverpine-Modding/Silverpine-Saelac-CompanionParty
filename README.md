@@ -1,4 +1,4 @@
-# Companion Party 0.2.6
+# Companion Party 0.2.10
 
 A BepInEx 5 plugin for Silverpine 1.7.3. It uses Silverpine Modding Tools 1.13.0 or later for per-save storage, conversation actions, and prompt integration. Custom Item Loader, Additional Equipment Slots, and Attribute Expansion are optional.
 
@@ -28,7 +28,7 @@ Each dialogue prompt describes the speaker’s current wounds, incapacitation, o
 
 Open **Inventory → Mods → Party controls** to toggle **NPC equipment in dialogue**. It defaults to on. The speaker knows their own weapon and worn gear, and can see what nearby NPCs have equipped. Each description names the wearer and uses their pronouns. Native clothing details, registered custom slots, and visible clothing details from the optional Revealing mod are supported. Carried items and gold belong to the speaker’s private pack. The toggle applies to the next prompt and is saved as `[Dialogue] IncludeNpcEquipment` in `BepInEx/config/silverpine.companionparty.cfg`.
 
-The ten base-game residents start with personal outfits based on their portraits. Custom NPCs start in Silverpine’s **Linen Shirt** and **Linen Pants**. Starting equipment belongs to the NPC and is granted once per save. When upgrading a save, a resident who already has a managed outfit keeps wearing it and receives the starting clothes in their pack.
+The ten base-game residents start with personal outfits based on their portraits. Each spawned custom NPC receives Silverpine’s **Linen Shirt** and **Linen Pants** once per save, including inactive residents and those in extended NPC slots. The clothes belong to the character by their custom content name, so their pack follows them if the game reassigns their slot. When upgrading a save, a resident who already has a managed outfit keeps wearing it and receives the starting clothes in their pack.
 
 | Resident | Starting equipment |
 | --- | --- |
@@ -44,6 +44,10 @@ The ten base-game residents start with personal outfits based on their portraits
 | Rosalyn | Apothecary's Sashed Dress |
 
 Chest and waist coverage follow the player’s equipment rules. A robe can cover both areas, underlayers count when Additional Equipment Slots is installed, and Revealing’s item settings take precedence for that garment. Removing the last covering layer selects the NPC’s alternate dialogue portrait when available. Linked playerSILC characters can also use their own alternate map sprite. The dialogue toggle controls whether speakers describe coverage and visible clothing. Changing equipment and artwork uses no model calls.
+
+When an NPC undresses in conversation, they put their equipped items in their personal pack and remember each item's slot. On redressing they put those same items back on, including borrowed and enchanted gear. The outfit survives saving, loading, and leaving the party. Racial fur and ordinary rings and necklaces stay equipped. If you reclaim a loan or equip a replacement, the NPC respects that change. An NPC first encountered undressed can put on their starting outfit. Older saves also recover the redress action for a custom NPC whose only possessions are their untouched, unworn starter linens. For other older outfits without a wear history, equip the desired items once.
+
+Outside your party, residents use Silverpine's normal dialogue actions. When a new conversation scene begins, the game can reconsider the clothing of an undressed resident who has an alternate portrait. If it decides they got dressed between conversations, they put their remembered gear back on. In your party, actual equipment determines their appearance across scenes without a clothing-state model request. Recruiting or dismissing an NPC switches this behavior immediately.
 
 ## Shopping and wishes
 

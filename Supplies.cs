@@ -202,14 +202,15 @@ internal static class Market
         var item = p.Items.Last();
         Wishes.Fulfill(p, item.Item);
         var slot = item.Item.GetEquipmentSlotType();
-        if (!p.Pinned && slot != EquipmentSlotType.NotEquipable && GearScore(item.Item) > GearScore(p.Wears(slot)?.Item)) p.Equip(item, false);
+        if (!p.Pinned && !Outfit.HasSetAside(p) && slot != EquipmentSlotType.NotEquipable &&
+            GearScore(item.Item) > GearScore(p.Wears(slot)?.Item)) p.Equip(item, false);
     }
     private static void SellSurplus(Companion owner, NeuralNPC merchant, Inventory till)
     {
         // Only replaced personal equipment is considered surplus. Loans and wish items stay with the NPC.
         var accepts = merchant.GetComponent<Vendor>()?.buyList;
         if (accepts == null || owner.Pinned) return;
-        var spare = owner.Items.FirstOrDefault(e => e.Item != null && !e.Loan && e.Slot == 0 &&
+        var spare = owner.Items.FirstOrDefault(e => e.Item != null && !e.Loan && e.Slot == 0 && e.RedressSlot == 0 &&
             accepts.Contains(e.Item.itemCategory) && !Wishes.Match(owner, e.Item) &&
             e.Item.GetEquipmentSlotType() != EquipmentSlotType.NotEquipable &&
             owner.Wears(e.Item.GetEquipmentSlotType()) is PackEntry worn && GearScore(worn.Item) > GearScore(e.Item));

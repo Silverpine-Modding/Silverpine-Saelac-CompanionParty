@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using BepInEx;
 using BepInEx.Bootstrap;
 using HarmonyLib;
@@ -617,6 +618,17 @@ public sealed class Checks : BaseUnityPlugin
         State.Restore(original);
     }
 
+    private static TaskCompletionSource<string> clothingReply;
+    private static int clothingRequests;
+    private static bool AnswerClothingQuestion(NeuralNPC __instance, string question, ref Task<string> __result)
+    {
+        if (!question.StartsWith("Should " + __instance.GetFinalName() + " still be naked in this new scene?", StringComparison.Ordinal))
+            return true;
+        clothingRequests++;
+        __result = clothingReply.Task;
+        return false;
+    }
+
     private System.Collections.IEnumerator CheckPortraits(NeuralNPC actor, Companion p, Player player, DialogBox box)
     {
         var fields = Traverse.Create(actor);
@@ -649,13 +661,84 @@ public sealed class Checks : BaseUnityPlugin
         for (int i = 0; i < 5; i++) yield return null;
         Check(image.sprite == regular && mover.nonDirectionalSprite == mapOriginal && SceneText(actor).Contains("uncovered below the waist"),
             "Re-equipping a shirt restores the normal portrait and map art and reports partial coverage");
-        p.Remove(p.Items.Last());
-        var action = new NPCFunction_ChangeClothingState { owner = actor };
-        Check(!action.IsActive("getting undressed") && !action.IsAPIActive() && action.Invoke().IsCompleted && actor.isNude &&
-            actor.AskYesNoCotQuestion("Should " + name + " still be naked in this new scene?", -1).Result,
-            "The native clothing action and scene continuity use the real outfit without inference");
+        var entryCoat = p.Items.Last();
+        var select = AccessTools.Method(typeof(NeuralNPC), "GetActiveNPCFunctions");
+        NPCFunction Clothing(string line, bool tools) => ((List<NPCFunction>)select.Invoke(actor, new object[] { line, tools }))
+            .OfType<NPCFunction_ChangeClothingState>().Single();
+        var undress = Clothing(name + " removes a coat.", false);
+        Check(undress.APIName == "change_clothing_state_to_nude" && Clothing("", true).APIName == undress.APIName,
+            "Both native dialogue paths select the NPC's undress action");
+        undress.Invoke().GetAwaiter().GetResult();
+        undress.Invoke().GetAwaiter().GetResult();
+        for (int i = 0; i < 5; i++) yield return null;
+        Check(entryCoat.Slot == 0 && entryCoat.RedressSlot == (int)EquipmentSlotType.Chest && image.sprite == alternate &&
+            SceneText(actor).Contains("is nude") && actor.AskYesNoCotQuestion("Should " + name + " still be naked in this new scene?", -1).Result,
+            "Confirmed dialogue undress updates the real pack, open portrait and scene, and repeating it is harmless");
+        var knowledge = Plugin.EquipmentInDialogue.Value;
+        Plugin.EquipmentInDialogue.Value = false;
+        try
+        {
+            var redress = Clothing("", true);
+            Check(redress.APIName == "change_clothing_state_to_clothed" && Clothing(name + " puts it back on.", false).Name == redress.Name &&
+                undress.Name != redress.Name, "Consecutive turns have distinct actions even with equipment descriptions disabled");
+            redress.Invoke().GetAwaiter().GetResult();
+            redress.Invoke().GetAwaiter().GetResult();
+        }
+        finally { Plugin.EquipmentInDialogue.Value = knowledge; }
+        for (int i = 0; i < 5; i++) yield return null;
+        Check(p.Wears(EquipmentSlotType.Chest) == entryCoat && entryCoat.Item == coat && entryCoat.Loan &&
+            image.sprite == regular && mover.nonDirectionalSprite == mapOriginal, "Dialogue redress restores the same loan and both portraits");
+        var answers = new Harmony("silverpine.companionparty.checks.scene-answers");
+        var ask = AccessTools.Method(typeof(NeuralNPC), nameof(NeuralNPC.AskQuestion));
+        answers.Patch(ask, prefix: new HarmonyMethod(typeof(Checks), nameof(AnswerClothingQuestion)));
+        string question = "Should " + name + " still be naked in this new scene?";
+        try
+        {
+            PartyApi.Dismiss(actor);
+            actor.dialogNudeSprite = null;
+            var residentAction = new NPCFunction_ChangeClothingState { owner = actor };
+            Check(!residentAction.IsActive("undresses") && !residentAction.IsAPIActive(),
+                "A dismissed resident without alternate art uses Silverpine's normal clothing eligibility");
+            actor.dialogNudeSprite = alternate;
+            var native = Clothing(name + " undresses.", false);
+            Check(!p.Recruited && native.GetType() == typeof(NPCFunction_ChangeClothingState) && !native.IsAPIActive(),
+                "Dismissal immediately restores the base game's clothing action and tool eligibility");
+            var change = native.Invoke();
+            while (!change.IsCompleted) yield return null;
+            change.GetAwaiter().GetResult();
+            Check(actor.isNude && entryCoat.Slot == 0 && entryCoat.RedressSlot == (int)EquipmentSlotType.Chest &&
+                native.IsAPIActive(), "A native undress action stows the resident's actual coat and enables native redress");
+            foreach (bool stayNude in new[] { true, false })
+            {
+                actor.isNude = false; // Both native dialogue entry points clear the flag while asking.
+                clothingReply = new TaskCompletionSource<string>();
+                var pending = actor.AskYesNoCotQuestion(question, -1);
+                Check(!pending.IsCompleted && !SceneText(actor).Contains(name + " is nude."),
+                    "The resident's new scene waits for the native model without supplying a nude verdict");
+                clothingReply.SetResult(stayNude ? "Yes" : "No");
+                while (!pending.IsCompleted) yield return null;
+                actor.isNude = pending.GetAwaiter().GetResult();
+                Check(actor.isNude == stayNude && (p.Wears(EquipmentSlotType.Chest) == entryCoat) == !stayNude &&
+                    actor.GetDialogSprite() == (stayNude ? alternate : regular) &&
+                    mover.nonDirectionalSprite == (stayNude ? alternate : mapOriginal), "The native scene answer matches the real pack and artwork: " + stayNude);
+            }
+            Check(clothingRequests == 2 && entryCoat.Item == coat && entryCoat.Loan, "Two resident scene checks use two native requests and restore the original loan");
+            clothingReply = new TaskCompletionSource<string>();
+            var beforeRecruitment = actor.AskYesNoCotQuestion(question, -1);
+            Check(PartyApi.Recruit(actor), "The resident rejoins during a pending scene answer");
+            clothingReply.SetResult("Yes");
+            while (!beforeRecruitment.IsCompleted) yield return null;
+            Check(!beforeRecruitment.Result && p.Wears(EquipmentSlotType.Chest) == entryCoat &&
+                !actor.AskYesNoCotQuestion(question, -1).Result && clothingRequests == 3,
+                "Recruitment keeps the equipped coat and subsequent party checks bypass the model");
+        }
+        finally { answers.Unpatch(ask, HarmonyPatchType.Prefix, answers.Id); }
         actor.dialogNudeSprite = null;
+        Clothing(name + " undresses.", false).Invoke().GetAwaiter().GetResult();
         Check(actor.GetDialogSprite() == regular, "An NPC without alternate artwork retains the regular portrait while nude");
+        Check(actor.isNude && entryCoat.Slot == 0, "An NPC without alternate artwork can still undress");
+        p.Remove(entryCoat);
+        Check(!new NPCFunction_ChangeClothingState { owner = actor }.IsAPIActive(), "Reclaiming the only loan leaves no outfit to recreate");
         if (oldDef == null) CustomContentDefinition_NPC.loaded.Remove(name); else CustomContentDefinition_NPC.loaded[name] = oldDef;
         CustomContentDefinition_PlayerCharacter.loaded.Remove(art);
         p.Clamp();
@@ -680,8 +763,159 @@ public sealed class Checks : BaseUnityPlugin
         go.SetActive(true);
         return enemy;
     }
+    private void CheckWishReplies()
+    {
+        const string sword = "A finely crafted blade would be a symbol of his skill and a tool he could truly rely on, something he never had growing up with hand-me-downs from the mercenaries.";
+        const string book = "Despite his rough upbringing, his clever mind craves knowledge. A book on strategy or history would be a private way to sharpen his intellect.";
+        const string potion = "Having nearly died as a child and survived many battles, he secretly fears a wound he can't walk away from. A healing potion would be a quiet security.";
+        string reply = "```json\n[\n" +
+            "{\"item\":\"sword\",\"reason\":\"" + sword + "\"},\n" +
+            "{\"item\":\"book\",\"reason\":\"" + book + "\"},\n" +
+            "{\"item\":\"healing potion\",\"reason\":\"" + potion + "\"}";
+        var p = new Companion { WishesFulfilled = true };
+        Check(Wishes.ApplyReply(p, reply, "three") && p.WishFingerprint == "three" && !p.WishesFulfilled &&
+            p.Wishes.SequenceEqual(new[] { "sword | " + sword, "book | " + book, "healing potion | " + potion }),
+            "The reported fenced reply keeps the sword, book and healing potion with their reasons despite the missing closing bracket");
+
+        const string entry = """{"item":"book","reason":"The note says \"read [this] }\"."}""";
+        const string wish = "book | The note says \"read [this] }\".";
+        foreach (string tail in new[] { "", ",", ",{\"item\":\"oil\",\"reason\":\"par", ",{\"item\":\"oil\",\"reason\":\"complete string\"" })
+            Check(Wishes.ApplyReply(p, "[" + entry + tail, "partial") && p.Wishes.SequenceEqual(new[] { wish }),
+                "Only completed JSON objects survive a cut-off reply (tail length " + tail.Length + ")");
+        Check(Wishes.ApplyReply(p, "Answer:\n```json\n[" + entry + "," + entry + "]\n```\n[done]", "closed") &&
+            p.Wishes.SequenceEqual(new[] { wish }), "Fences, quoted delimiters, duplicate entries and trailing text preserve the correct list");
+        Check(Wishes.ApplyReply(new Companion(), """[{"item":"book","reason":"The page explains ```json syntax."}]""", "bare"),
+            "A literal Markdown marker inside a wish reason is ordinary text");
+
+        p.WishesFulfilled = true;
+        foreach (string bad in new[] { null, "", "no JSON", "[", "[{\"item\":\"oil\"", "[{\"item\":42,\"reason\":\"lamp\"}]",
+            "[{\"item\":\"oil|bad\",\"reason\":\"lamp\"}]", "[{\"item\":\"oil\",\"reason\":\"" + new string('x', 181) + "\"}]" })
+            Check(!Wishes.ApplyReply(p, bad, "bad") && p.Wishes.SequenceEqual(new[] { wish }) && p.WishFingerprint == "closed" && p.WishesFulfilled,
+                "Unusable output preserves existing wishes, fulfillment and fingerprint (reply length " + (bad?.Length ?? 0) + ")");
+        Check(Wishes.ApplyReply(p, "```json\n[ ]\n```", "empty") && p.Wishes.Count == 0 && !p.WishesFulfilled && p.WishFingerprint == "empty",
+            "An explicit empty wish list is a successful result");
+    }
+
+    private void CheckOutfitMemory(NeuralNPC npc, Player player, Companion p)
+    {
+        var original = State.Capture();
+        PackEntry Give(Item item, bool loan)
+        {
+            player.worldInventory.inventory.TryAddItem(item);
+            Check(p.Accept(item, loan), "Transferred outfit fixture " + item.name);
+            return p.Items.Last();
+        }
+        var coat = Garment("Matching coats", EquipmentSlotType.Chest);
+        coat.AddItemComponent(new ItemComponent_Enchantment(ItemComponent_Enchantment.EnchantmentType.Vitality));
+        coat.AddItemComponent(new ItemComponent_Durability(50));
+        coat.GetItemComponent<ItemComponent_Durability>().Durability = 27;
+        var loan = Give(coat, true);
+        var duplicate = Give(Garment(coat.name, EquipmentSlotType.Chest), false);
+        var ring = Give(Garment("Keepsake", EquipmentSlotType.Ring), false);
+        p.Equip(loan, true);
+        p.Equip(ring, true);
+        int clothedHP = Stats.Read(p).MaxHP;
+        Outfit.Change(p, false);
+        Check(p.Worn.Single() == ring && loan.RedressSlot == (int)EquipmentSlotType.Chest && duplicate.RedressSlot == 0 &&
+            Stats.Read(p).MaxHP == clothedHP - 10 && !p.Recruited, "Undressing a resident stows the worn copy, removes its bonus and keeps ordinary jewelry");
+        State.Restore(State.Capture());
+        p = State.Get(npc);
+        Outfit.Change(p, true);
+        var restored = p.Wears(EquipmentSlotType.Chest);
+        Check(restored.Name == coat.name && restored.Loan && restored.Item.GetItemComponent<ItemComponent_Durability>().Durability == 27 &&
+            p.Items.Count(e => e.Name == coat.name) == 2 && p.Wears(EquipmentSlotType.Legs)?.Name == "Linen Pants" &&
+            Stats.Read(p).MaxHP == clothedHP, "After reload, redressing restores the original loan, durability, enchantment and trousers");
+        Outfit.Change(p, false);
+        p.Remove(restored);
+        var replacement = Give(Garment("Replacement robe", EquipmentSlotType.Chest, EquipmentSlotType.Legs), false);
+        p.Equip(replacement, true);
+        Outfit.Change(p, true);
+        Check(p.Wears(EquipmentSlotType.Chest) == replacement && p.Wears(EquipmentSlotType.Legs) == null &&
+            p.Items.Count(e => e.Name == coat.name) == 1 && !Outfit.HasSetAside(p),
+            "Redressing respects an intervening multi-slot replacement and cannot recreate a reclaimed loan");
+        Outfit.Change(p, false);
+        replacement.Sprite = "custom:unavailable:robe";
+        State.Restore(State.Capture());
+        p = State.Get(npc);
+        replacement = p.Items.Single(e => e.Name == "Replacement robe");
+        p.Equip(p.Items.Single(e => e.Name == "Linen Pants"), true);
+        Check(replacement.Item == null && replacement.RedressSlot == 0 && replacement.Slot == 0,
+            "Equipping trousers respects the extra slot of a stowed robe while its provider is missing");
+        State.Reset();
+        npc.isNude = true;
+        p = State.Get(npc);
+        Check(npc.isNude && !p.Worn.Any() && Outfit.HasSetAside(p), "A newly encountered undressed NPC has a starting outfit ready in the pack");
+        Outfit.Change(p, true);
+        Check(!npc.isNude && p.Worn.Count() == 2, "An initially undressed NPC can dress in the granted items");
+        State.Restore(original);
+    }
+
+    private void CheckCustomRoster()
+    {
+        var original = State.Capture();
+        int count = Enum.IsDefined(typeof(NPCName), "CustomNPCSlot96") ? 96 : 8;
+        var actors = new List<NeuralNPC>();
+        string Key(int i) => "custom:QA linen resident " + i;
+        bool HasLinen(Companion p) => p.Items.Count == 2 && p.Wears(EquipmentSlotType.Chest)?.Name == "Linen Shirt" &&
+            p.Wears(EquipmentSlotType.Legs)?.Name == "Linen Pants" && p.Items.All(e => e.Item.inventory == p.Pack);
+        for (int i = 0; i < count; i++)
+        {
+            var go = new GameObject("QA linen resident " + i);
+            var handler = go.AddComponent<CustomNPCHandler>(); // Native Awake registers this handler.
+            go.SetActive(false);
+            handler.customContentName = i == count - 1 ? null : go.name;
+            handler.slot = (NPCName)((int)NPCName.CustomNPCSlot1 + i);
+            var npc = go.AddComponent<NeuralNPC>();
+            // The manager assigns npcName separately from the handler's identity.
+            npc.npcName = i % 2 == 0 ? handler.slot : NPCName.None;
+            actors.Add(npc);
+        }
+        var pending = actors.Last().GetComponent<CustomNPCHandler>();
+        SerializationManager.loadingSave = true;
+        try { State.EnsureCustomResidents(); }
+        finally { SerializationManager.loadingSave = false; }
+        Check(!State.Save.People.ContainsKey(Key(0)), "The roster waits for the save to finish loading");
+        State.EnsureCustomResidents();
+        Check(!State.Find(actors.Last(), out _) && !State.Save.People.ContainsKey(Key(count - 1)) &&
+            Enumerable.Range(0, count - 1).All(i => State.Save.People.TryGetValue(Key(i), out var p) && HasLinen(p)),
+            "Inactive and unregistered residents receive their linen while the unnamed spawn waits");
+        pending.customContentName = pending.gameObject.name;
+        var templates = ItemLibrary.Items;
+        int pantsIndex = templates.FindIndex(item => item.name == "Linen Pants");
+        var pants = templates[pantsIndex];
+        templates.RemoveAt(pantsIndex);
+        try { State.EnsureCustomResidents(); }
+        finally { templates.Insert(pantsIndex, pants); }
+        var late = State.Save.People[Key(count - 1)];
+        Check(!late.ReceivedStartingEquipment && late.Items.Count == 0, "An unavailable template defers the entire pair");
+        State.EnsureCustomResidents();
+        State.EnsureCustomResidents();
+        var people = Enumerable.Range(0, count).Select(i => State.Save.People[Key(i)]).ToArray();
+        Check(people.All(HasLinen) && people.SelectMany(p => p.Items).Select(e => e.Item).Distinct().Count() == 2 * count,
+            count + " custom NPCs each receive a distinct physical shirt and pants exactly once");
+        for (int i = 0; i < count; i++) people[i].Gold = i + 1;
+        people[0].Remove(people[0].Wears(EquipmentSlotType.Chest));
+        foreach (var entry in late.Items) { entry.Slot = 0; entry.SavedCoverage = null; }
+        late.Clamp(); // The two carried, never-worn linens seen in older saves.
+        State.Restore(State.Capture());
+        for (int i = 0; i < count; i++)
+            actors[i].npcName = actors[i].GetComponent<CustomNPCHandler>().slot = (NPCName)((int)NPCName.CustomNPCSlot1 + count - 1 - i);
+        State.EnsureCustomResidents();
+        people = Enumerable.Range(0, count).Select(i => State.Save.People[Key(i)]).ToArray();
+        late = people.Last();
+        Check(late.Covered == BodyCoverage.None && !late.Worn.Any() && late.Items.Count == 2 && Outfit.HasSetAside(late),
+            "Loading an old never-worn linen pair offers redressing and preserves the current appearance");
+        Outfit.Change(late, true);
+        Check(people.Select((p, i) => p.Actor == actors[i] && p.Gold == i + 1).All(x => x) &&
+            people[0].Items.Count == 1 && people.Skip(1).All(HasLinen),
+            count + " custom inventories survive reassigned slots and reload, including a removed shirt and a recovered outfit");
+        foreach (var npc in actors) UnityEngine.Object.DestroyImmediate(npc.gameObject);
+        State.Restore(original);
+    }
+
     private void RunChecks()
     {
+        CheckWishReplies();
         Check(Harmony.GetAllPatchedMethods().Count(m => Harmony.GetPatchInfo(m)?.Owners.Contains(Plugin.Id) == true) >= 10, "Runtime Harmony patches installed");
         bool slots = Chainloader.PluginInfos.ContainsKey("renegadex.silverpine.additionalequipmentslots");
         bool expanded = Chainloader.PluginInfos.ContainsKey(GearMods.Expansion);
@@ -709,6 +943,8 @@ public sealed class Checks : BaseUnityPlugin
         Check(p.Wears(EquipmentSlotType.Chest)?.Name == "Linen Shirt" && p.Wears(EquipmentSlotType.Legs)?.Name == "Linen Pants" &&
             p.Items.Count == 2 && !p.Pinned && merchant.inventory.items.Count == 0, "Custom NPCs receive the player's native linen set in their personal inventory");
         CheckPlayerParity(hero, p, "the custom NPC's starting linen outfit");
+        CheckOutfitMemory(actor, hero, p);
+        p = State.Get(actor);
         foreach (var entry in p.Items.ToArray()) p.Remove(entry);
         var existing = Garment("Existing borrowed armor", EquipmentSlotType.Chest);
         hero.worldInventory.inventory.TryAddItem(existing);
@@ -721,6 +957,12 @@ public sealed class Checks : BaseUnityPlugin
         foreach (var entry in p.Items.ToArray()) p.Remove(entry);
         State.Restore(State.Capture()); p = State.Get(actor);
         Check(p.Items.Count == 0 && p.ManagesOutfit && actor.isNude, "Removed starting items and the resulting appearance survive reload without a duplicate grant");
+        Outfit.ApplyNativeState(p, false);
+        State.Restore(State.Capture()); p = State.Get(actor);
+        p.Clamp();
+        Check(!actor.isNude && !EquipmentKnowledge.Describe(p).Contains("is nude") && p.Items.Count == 0,
+            "A resident's native dressed appearance survives reload and stat refresh after their clothing was removed");
+        Outfit.ApplyNativeState(p, true);
         CheckConversation(actor, p, merchant.inventory);
         Check(Stats.Read(p).MaxHP == 85 && Stats.Read(p).NightSight, "playerSILC racial stats and night vision resolved");
         var armour = new Item("Test Coat", "sprite_test", "", 20, ItemCategory.Clothing, ItemSound.Cloth, 1f,
@@ -882,17 +1124,29 @@ public sealed class Checks : BaseUnityPlugin
                 EquipTestItem("mantle");
                 CheckPlayerParity(hero, outfit, "a custom back garment with explicit coverage");
                 Check(outfit.Covered.HasFlag(BodyCoverage.Chest), "An opaque garment retains coverage beside an open garment");
+                var layers = outfit.Worn.ToDictionary(e => e, e => e.Slot);
+                Outfit.Change(outfit, false);
+                Check(outfit.Covered == BodyCoverage.None && layers.All(pair => pair.Key.Slot == 0 && pair.Key.RedressSlot == pair.Value),
+                    "Dialogue undress stows custom slots and all underlayers");
+                Outfit.Change(outfit, true);
+                Check(layers.All(pair => pair.Key.Slot == pair.Value && pair.Key.RedressSlot == 0),
+                    "Dialogue redress restores every custom layer to its original slot");
             }
         }
+        CheckCustomRoster();
+        p = State.Get(actor);
         string handoff = Path.Combine(Paths.GameRootPath, "equipment-roundtrip.json");
         if (File.Exists(handoff))
         {
             State.Restore(File.ReadAllText(handoff));
             p = State.Get(actor);
             var cloak = p.Items.Single(e => e.Sprite == "custom:party.test:cape");
-            Check(cloak.Slot == 10001 && (cloak.Item != null) == slots, "Previous installation's cloak preserved at its original slot");
+            Check(cloak.Slot == 0 && cloak.RedressSlot == 10001 && (cloak.Item != null) == slots, "Previous installation's stowed cloak remembers its custom slot");
+            Outfit.Change(p, true);
+            Check(cloak.Slot == 10001, "The remembered custom slot is restored even while its provider is absent");
             if (cloak.Item != null)
                 Check(cloak.Item.GetItemComponent<ItemComponent_Durability>().Durability == 19 && Math.Abs(Stats.Read(p).Speed - .25f) < .001f, "Restored cloak keeps its durability and a single regeneration of its modifiers");
+            Outfit.Change(p, false);
             File.WriteAllText(handoff, State.Capture());
         }
         else if (slots && expanded)
@@ -900,6 +1154,7 @@ public sealed class Checks : BaseUnityPlugin
             var cloak = p.Items.Last().Item;
             var durability = cloak.GetItemComponent<ItemComponent_Durability>();
             durability.Durability = 19;
+            Outfit.Change(p, false);
             File.WriteAllText(handoff, State.Capture());
         }
     }

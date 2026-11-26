@@ -14,6 +14,8 @@ public sealed class PackEntry
     public List<string> Components;
     public bool Loan;
     public int Slot;
+    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)] internal int RedressSlot;
+    [JsonProperty(NullValueHandling = NullValueHandling.Ignore)] internal List<EquipmentSlotType> SavedAccessorySlots;
     // Retain the garment's last known coverage while its item or slot provider is absent.
     [JsonProperty] internal BodyCoverage? SavedCoverage;
     [JsonIgnore] public Item Item;
@@ -31,11 +33,16 @@ public sealed class PackEntry
         Item.Serialize(writer);
         Data = Convert.ToBase64String(stream.ToArray());
         Components = Item.GetItemComponents<ItemComponent>().Select(c => c.GetType().FullName).ToList();
+        var accessorySlots = Item.GetItemComponent<ItemComponent_Accessory>()?.coveredSlots;
+        SavedAccessorySlots = accessorySlots?.Count > 0 ? new List<EquipmentSlotType>(accessorySlots) : null;
     }
+
+    internal bool CoversSlot(int slot) => (Item == null ? SavedAccessorySlots :
+        Item.GetItemComponent<ItemComponent_Accessory>()?.coveredSlots)?.Contains((EquipmentSlotType)slot) == true;
 
     internal bool Restore(Inventory pack)
     {
-        if (Item != null || !GearMods.Available(Sprite, Slot)) return false;
+        if (Item != null || !GearMods.Available(Sprite, Slot != 0 ? Slot : RedressSlot)) return false;
         using var stream = new MemoryStream(Convert.FromBase64String(Data));
         using var reader = new BinaryReader(stream);
         var item = new Item();
@@ -90,7 +97,7 @@ public sealed class Companion
             LeaveCombat();
             Actor = npc;
             Pack.owner = npc.gameObject;
-            Name = npc.GetFinalName();
+            Name = npc.GetComponent<CustomNPCHandler>()?.customContentName ?? npc.GetFinalName();
             Rebind = true;
         }
         if (!Rebind) return;
@@ -105,7 +112,7 @@ public sealed class Companion
             catch (Exception ex) { Failed.Add(entry); Plugin.Log.LogWarning($"Retaining unavailable {entry.Name}: {ex.GetBaseException().Message}"); }
         }
         if (newActor && Recruited) SkillBonuses = PartySkillApi.Resolve(npc);
-        Clamp();
+        Clamp(preserveNativeAppearance: true);
     }
 
     internal IEnumerable<PackEntry> Worn => Items.Where(e => e.Slot != 0 && e.Item != null);
@@ -116,7 +123,7 @@ public sealed class Companion
         SkillBonuses = Recruited ? PartySkillApi.Resolve(Actor) : Array.Empty<PartySkillBonuses>();
         Clamp();
     }
-    internal void Clamp()
+    internal void Clamp(bool preserveNativeAppearance = false)
     {
         CachedStats = null;
         var stats = Stats.Read(this);
@@ -128,7 +135,7 @@ public sealed class Companion
             Pack.maxBulk = stats.Capacity;
             Pack.UpdateEncumbered();
         }
-        Outfit.Update(this);
+        Outfit.Update(this, preserveNativeAppearance);
     }
     internal void Remove(PackEntry entry)
     {
@@ -153,20 +160,21 @@ public sealed class Companion
         if (!Items.Contains(entry) || entry.Item == null) return false;
         var slot = entry.Item.GetEquipmentSlotType();
         if (slot == EquipmentSlotType.NotEquipable || !GearMods.Available(entry.Sprite, (int)slot)) return false;
-        var covers = entry.Item.GetItemComponent<ItemComponent_Accessory>()?.coveredSlots;
         foreach (var other in Items)
         {
-            if (other.Slot == 0) continue;
-            var otherSlot = (EquipmentSlotType)other.Slot;
-            if (otherSlot == slot || (covers?.Contains(otherSlot) ?? false) ||
-                (other.Item?.GetItemComponent<ItemComponent_Accessory>()?.coveredSlots?.Contains(slot) ?? false))
+            if (other.Slot != 0 && Conflicts(entry, (int)slot, other, other.Slot))
                 other.Slot = 0;
+            if (other.RedressSlot != 0 && Conflicts(entry, (int)slot, other, other.RedressSlot))
+                other.RedressSlot = 0;
         }
         entry.Slot = (int)slot;
         if (manual) Pinned = true;
         Clamp();
         return true;
     }
+
+    internal static bool Conflicts(PackEntry a, int slotA, PackEntry b, int slotB) =>
+        slotA == slotB || a.CoversSlot(slotB) || b.CoversSlot(slotA);
 }
 
 public sealed class Campaign
@@ -183,8 +191,22 @@ internal static class State
     internal static string Key(NeuralNPC npc)
     {
         var custom = npc.GetComponent<CustomNPCHandler>();
-        return custom != null && !string.IsNullOrEmpty(custom.customContentName)
-            ? "custom:" + custom.customContentName : "native:" + npc.npcName;
+        return custom != null && !string.IsNullOrWhiteSpace(custom.customContentName)
+            ? CustomKey(custom) : "native:" + npc.npcName;
+    }
+    private static string CustomKey(CustomNPCHandler custom) => "custom:" + custom.customContentName;
+
+    internal static void EnsureCustomResidents()
+    {
+        // The custom manager owns these actors before slot registration and while some actors are inactive.
+        if (SerializationManager.loadingSave) return;
+        foreach (var custom in CustomNPCHandler.customNPCHandlers.ToArray())
+        {
+            if (!custom || string.IsNullOrWhiteSpace(custom.customContentName)) continue;
+            if (!custom.TryGetComponent<NeuralNPC>(out var npc)) continue;
+            if (Save.People.TryGetValue(CustomKey(custom), out var person) && person.Actor == npc && person.ReceivedStartingEquipment) continue;
+            Get(npc);
+        }
     }
     internal static Companion Get(NeuralNPC npc)
     {
@@ -198,10 +220,14 @@ internal static class State
     {
         person = null;
         if (npc == null) return false;
-        if (!Save.People.TryGetValue(Key(npc), out person))
+        var custom = npc.GetComponent<CustomNPCHandler>();
+        if (custom && string.IsNullOrWhiteSpace(custom.customContentName)) return false;
+        if (!Save.People.TryGetValue(custom ? CustomKey(custom) : "native:" + npc.npcName, out person))
         {
-            if (!Plugin.Ready || !npc.isActiveAndEnabled || npc.npcName == NPCName.None ||
-                !NeuralNPC.neuralNPCs.TryGetValue(npc.npcName, out var resident) || resident != npc) return false;
+            if (!Plugin.Ready) return false;
+            bool spawnedCustom = custom && CustomNPCHandler.customNPCHandlers.Contains(custom);
+            if (!spawnedCustom && (!npc.isActiveAndEnabled || npc.npcName == NPCName.None ||
+                !NeuralNPC.neuralNPCs.TryGetValue(npc.npcName, out var resident) || resident != npc)) return false;
             person = Get(npc);
             return true;
         }
@@ -226,6 +252,8 @@ internal static class State
         var data = JsonConvert.DeserializeObject<Campaign>(json);
         if (data?.People == null || data.Attempts == null || data.People.Values.Any(p => p?.Items == null || p.Wishes == null || p.Gold < 0 ||
             p.Items.Any(e => e == null || string.IsNullOrEmpty(e.Data)))) throw new InvalidDataException("Invalid companion save.");
+        foreach (var pair in data.People)
+            if (pair.Key.StartsWith("custom:", StringComparison.Ordinal)) StartingEquipment.RestoreLegacyLinen(pair.Value);
         ReleaseOutfits();
         Save = data;
     }

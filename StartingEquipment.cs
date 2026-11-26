@@ -13,7 +13,9 @@ internal static class StartingEquipment
 
         internal Item Create()
         {
-            var item = ItemLibrary.GetItemByName(Template, true);
+            var item = ItemLibrary.GetItemByName(Template, false);
+            // GetItemByName returns a junk item when the requested template is unavailable.
+            if (item?.name != Template) return null;
             if (Name != null) item.name = Name;
             if (Description != null)
             {
@@ -78,29 +80,47 @@ internal static class StartingEquipment
     {
         var npc = person.Actor;
         if (person.ReceivedStartingEquipment || SerializationManager.loadingSave) return;
-        if (!Residents.TryGetValue(npc.npcName, out var outfit))
+        Piece[] outfit;
+        if (npc.TryGetComponent<CustomNPCHandler>(out var custom))
         {
-            if (!npc.IsCustomNPC() || string.IsNullOrWhiteSpace(npc.GetComponent<CustomNPCHandler>()?.customContentName)) return;
+            if (string.IsNullOrWhiteSpace(custom.customContentName)) return;
             outfit = Linen;
         }
+        else if (!Residents.TryGetValue(npc.npcName, out outfit)) return;
         // Create every physical item before changing the save. Existing outfits and deliberate
         // undress keep their appearance. A starter set can still be worn later from the pack.
         bool preserveClothes = person.ManagesOutfit || npc.isNude || person.Pinned ||
             person.Items.Any(e => e.Slot != 0 && e.Item == null);
+        bool startUndressed = npc.isNude && person.Items.Count == 0 && !person.Pinned;
         var items = outfit.Select(piece => piece.Create()).ToArray();
+        if (items.Any(item => item == null)) return;
         foreach (var item in items)
         {
             var slot = item.GetEquipmentSlotType();
-            bool wear = slot != EquipmentSlotType.NotEquipable && !person.Items.Any(e => e.Slot == (int)slot) &&
+            bool wear = !startUndressed && slot != EquipmentSlotType.NotEquipable && !person.Items.Any(e => e.Slot == (int)slot) &&
                 (slot == EquipmentSlotType.Weapon ? !person.Pinned : !preserveClothes);
             // Starting possessions, like restored possessions, remain owned even in a full pack.
             item.inventory = person.Pack;
             person.Pack.items.Add(item);
-            person.Items.Add(new PackEntry { Name = item.name, Sprite = item.spriteName, Item = item, Slot = wear ? (int)slot : 0 });
+            person.Items.Add(new PackEntry { Name = item.name, Sprite = item.spriteName, Item = item,
+                Slot = wear ? (int)slot : 0, RedressSlot = startUndressed ? (int)slot : 0 });
         }
         person.ReceivedStartingEquipment = true;
         if (npc.isNude) person.ManagesOutfit = true;
         person.Clamp();
         person.Pack.UpdateEncumbered();
+    }
+
+    internal static void RestoreLegacyLinen(Companion person)
+    {
+        // Older saves could grant an undressed resident both linens without recording how to put them on.
+        // Only recover the unambiguous pair of never-worn, personally owned starter items.
+        if (!person.ReceivedStartingEquipment || !person.ManagesOutfit || person.Pinned || person.Items.Count != 2 ||
+            person.Items.Any(e => e.Loan || e.Slot != 0 || e.RedressSlot != 0 || e.SavedCoverage.HasValue)) return;
+        var shirt = person.Items.Find(e => e.Name == "Linen Shirt" && e.Sprite == "sprite_item_clothing_shirt_linen");
+        var pants = person.Items.Find(e => e.Name == "Linen Pants" && e.Sprite == "sprite_item_clothing_pants_linen");
+        if (shirt == null || pants == null) return;
+        shirt.RedressSlot = (int)EquipmentSlotType.Chest;
+        pants.RedressSlot = (int)EquipmentSlotType.Legs;
     }
 }

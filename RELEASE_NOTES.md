@@ -1,4 +1,20 @@
-# Companion Party 0.2.6
+# Companion Party 0.2.10
+
+Residents outside the player's party follow Silverpine's normal clothing decisions in individual and group conversations. Their real equipment follows the result. Party members continue to use their equipped coverage across scenes, including when recruitment happens during a pending scene check.
+
+## Companion Party 0.2.9
+
+Starter linen now reaches inactive custom residents and characters awaiting slot registration. The plugin retries as names and item templates become available. Custom residents in older saves who carry only their untouched, unworn starter shirt and pants can put them on through dialogue.
+
+## Companion Party 0.2.8
+
+NPCs can undress and redress during normal dialogue. Their personal pack remembers the original slot of each item they take off, including custom equipment. Redressing restores the same items across save and load and respects later gear changes and returned loans.
+
+## Companion Party 0.2.7
+
+NPCs keep complete wish entries when the model stops before the end of its JSON reply. A reply with no usable entry leaves prior wishes in place. An explicit empty list still clears them. Recovery uses the original reply and its existing token budget.
+
+## Companion Party 0.2.6
 
 Skills mods can now observe completed party journeys and player-assisted revivals through `PartySkillApi.PlayerActivity`.
 
